@@ -101,8 +101,8 @@ def print_restricted_name(output_fd, name, time_restrictions):
         print(name, file=output_fd, end="\n")
     else:
         print(
-            "# ignored: [{}] was in the time-restricted list, "
-            "but without a time restriction label".format(name),
+            "# ignored: an entry was in the time-restricted list, "
+            "but without a time restriction label",
             file=output_fd,
             end="\n",
         )
