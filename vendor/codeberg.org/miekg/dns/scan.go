@@ -60,7 +60,7 @@ func (e *ParseError) Error() (s string) {
 		e.err = e.wrappedErr.Error()
 	}
 	s += "dns: " + e.err + ": " + strconv.QuoteToASCII(e.lex.Token) + " at line: " +
-		strconv.Itoa(e.lex.Line) + ":" + strconv.Itoa(e.lex.Column)
+		strconv.Itoa(int(e.lex.Line)) + ":" + strconv.Itoa(int(e.lex.Column))
 	return
 }
 
@@ -115,8 +115,9 @@ func read(r io.Reader, file string) (RR, error) {
 	return rr, zp.Err()
 }
 
-// NewData parses s, but only for the rdata, i.e. when the full RR is "miek.nl. IN 3600 MX 10 mx.miek.nl.",
+// NewData parses s, but only for the [RDATA], i.e. when the full [RR] is "miek.nl. IN 3600 MX 10 mx.miek.nl.",
 // NewData must get "10 mx.miek.nl." and optionally an origin. Leading spaces are not allowed.
+// Examples can be found in [RDATA].
 func NewData(rrtype uint16, s string, origin ...string) (RDATA, error) {
 	return readData(strings.NewReader(s), rrtype, origin...)
 }

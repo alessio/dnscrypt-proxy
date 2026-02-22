@@ -9,6 +9,7 @@ import (
 	"github.com/jedisct1/dlog"
 	"github.com/jedisct1/xsecretbox"
 	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/crypto/nacl/secretbox"
 )
@@ -84,11 +85,11 @@ func (proxy *Proxy) Encrypt(
 	copy(nonce, clientNonce)
 	var publicKey *[PublicKeySize]byte
 	if proxy.ephemeralKeys {
-		h := sha512.New512_256()
-		h.Write(clientNonce)
-		h.Write(proxy.proxySecretKey[:])
 		var ephSk [32]byte
-		h.Sum(ephSk[:0])
+		kdf := hkdf.New(sha512.New, proxy.proxySecretKey[:], clientNonce, nil)
+		if _, err := kdf.Read(ephSk[:]); err != nil {
+			return nil, nil, nil, err
+		}
 		var xPublicKey [PublicKeySize]byte
 		curve25519.ScalarBaseMult(&xPublicKey, &ephSk)
 		publicKey = &xPublicKey
