@@ -97,7 +97,8 @@ def parse_list(content, trusted=False):
 
 def print_restricted_name(output_fd, name, time_restrictions):
     if name in time_restrictions:
-        print("{}\t{}".format(name, time_restrictions[name]), file=output_fd, end="\n")
+        # Avoid logging potentially sensitive time restriction labels; only print the name.
+        print(name, file=output_fd, end="\n")
     else:
         print(
             "# ignored: [{}] was in the time-restricted list, "
