@@ -161,51 +161,57 @@ func (m *Msg) Reset() {
 }
 
 func (m *Msg) Pack() error {
-	// Convert convenient Msg into wire-like Header.
-	var dh header
-	dh.ID = m.ID
-	dh.Bits = uint16(m.Opcode)<<11 | uint16(m.Rcode&0xF)
-	if m.Response {
-		dh.Bits |= _QR
-	}
-	if m.Authoritative {
-		dh.Bits |= _AA
-	}
-	if m.Truncated {
-		dh.Bits |= _TC
-	}
-	if m.RecursionDesired {
-		dh.Bits |= _RD
-	}
-	if m.RecursionAvailable {
-		dh.Bits |= _RA
-	}
-	if m.Zero {
-		dh.Bits |= _Z
-	}
-	if m.AuthenticatedData {
-		dh.Bits |= _AD
-	}
-	if m.CheckingDisabled {
-		dh.Bits |= _CD
-	}
-
-	isPseudo := m.isPseudo()
-	dh.Qdcount = uint16(len(m.Question))
-	dh.Ancount = uint16(len(m.Answer))
-	dh.Nscount = uint16(len(m.Ns))
-	dh.Arcount = uint16(len(m.Extra)) + uint16(isPseudo)
-
 	if l := m.Len(); cap(m.Data) < l {
 		m.Data = make([]byte, l)
 	} else {
 		m.Data = m.Data[:l]
 	}
 
-	off := 0
-	var err error
-	if off, err = dh.pack(m.Data, off); err != nil {
-		return err
+	off, err := pack.Uint16(m.ID, m.Data, 0)
+	if err != nil {
+		return pack.Errorf(": %s", "MsgHeader ID")
+	}
+
+	bits := uint16(m.Opcode)<<11 | uint16(m.Rcode&0xF)
+	if m.Response {
+		bits |= _QR
+	}
+	if m.Authoritative {
+		bits |= _AA
+	}
+	if m.Truncated {
+		bits |= _TC
+	}
+	if m.RecursionDesired {
+		bits |= _RD
+	}
+	if m.RecursionAvailable {
+		bits |= _RA
+	}
+	if m.Zero {
+		bits |= _Z
+	}
+	if m.AuthenticatedData {
+		bits |= _AD
+	}
+	if m.CheckingDisabled {
+		bits |= _CD
+	}
+
+	off, err = pack.Uint16(bits, m.Data, off)
+	if err != nil {
+		return pack.Errorf(": %s", "MsgHeader bits")
+	}
+
+	isPseudo := m.isPseudo()
+	counts := uint64(len(m.Question)<<48) |
+		uint64(len(m.Answer)<<32) |
+		uint64(len(m.Ns)<<16) |
+		uint64(len(m.Extra)+isPseudo)
+
+	off, err = pack.Uint64(counts, m.Data, off)
+	if err != nil {
+		return pack.Errorf(": %s", "MsgHeader")
 	}
 
 	// Is this compressible?
@@ -261,9 +267,9 @@ func (m *Msg) Pack() error {
 			opt.SetDelegation(true)
 		}
 		for i := range m.Pseudo {
-			opt.Hdr.Name = "."
 			switch x := m.Pseudo[i].(type) {
 			case EDNS0:
+				opt.Hdr.Name = "."
 				opt.Options = append(opt.Options, x)
 			default:
 				tsigOrsig0 = true
@@ -350,7 +356,29 @@ func unpackRRs(cnt uint16, msg *cryptobyte.String, msgBuf []byte) ([]RR, error) 
 	return dst, nil
 }
 
-func (m *Msg) unpack(dh header, s *cryptobyte.String, msgBuf []byte) (err error) {
+// Unpack unpacks a binary message that sits in m.Data to a Msg structure.
+func (m *Msg) Unpack() (err error) {
+	s := cryptobyte.String(m.Data)
+	var counts uint64 // read all counters into 64 bits and slice the 16 bits values out of it
+	var bits uint16
+	if !s.ReadUint16(&m.ID) || !s.ReadUint16(&bits) || !s.ReadUint64(&counts) {
+		return unpack.Errorf("overflow %s", "MsgHeader")
+	}
+	m.Response = bits&_QR != 0
+	m.Opcode = uint8(bits>>11) & 0xF
+	m.Authoritative = bits&_AA != 0
+	m.Truncated = bits&_TC != 0
+	m.RecursionDesired = bits&_RD != 0
+	m.RecursionAvailable = bits&_RA != 0
+	m.Zero = bits&_Z != 0 // _Z covers the zero bit, which should be zero; not sure why we set it to the opposite.
+	m.AuthenticatedData = bits&_AD != 0
+	m.CheckingDisabled = bits&_CD != 0
+	m.Rcode = bits & 0xF
+
+	if m.Options > 0 && m.Options <= MsgOptionUnpackHeader {
+		return nil
+	}
+
 	if m.offset > MsgHeaderSize {
 		if !s.Skip(int(m.offset - MsgHeaderSize)) {
 			return fmt.Errorf("overflow %s", "MsgHeader")
@@ -358,35 +386,37 @@ func (m *Msg) unpack(dh header, s *cryptobyte.String, msgBuf []byte) (err error)
 		goto Rest
 	}
 
-	if m.Question, err = m.unpackQuestions(dh.Qdcount, s, msgBuf); err != nil {
+	if m.Question, err = m.unpackQuestions(uint16((counts>>48)&0xFFFF), &s, m.Data); err != nil {
 		return err
 	}
 	if m.Options > 0 && m.Options <= MsgOptionUnpackQuestion {
-		m.offset = uint16(len(msgBuf) - len(*s))
+		m.offset = uint16(len(m.Data) - len(s))
 		return nil
 	}
 
 Rest:
 	m.offset = 0 // reset offset here, as it has done its purpose
-	if m.Answer, err = unpackRRs(dh.Ancount, s, msgBuf); err != nil {
+	if m.Answer, err = unpackRRs(uint16((counts>>32)&0xFFFF), &s, m.Data); err != nil {
 		return err
 	}
 	if m.Options > 0 && m.Options <= MsgOptionUnpackAnswer {
 		return nil
 	}
 
-	if m.Ns, err = unpackRRs(dh.Nscount, s, msgBuf); err != nil {
+	if m.Ns, err = unpackRRs(uint16((counts>>16)&0xFFFF), &s, m.Data); err != nil {
 		return err
 	}
 
-	if m.Extra, err = unpackRRs(dh.Arcount, s, msgBuf); err != nil {
+	if m.Extra, err = unpackRRs(uint16(counts&0xFFFF), &s, m.Data); err != nil {
 		return err
 	}
 
 	// Check for the OPT RR and remove it entirely, unpack the OPT for option codes and put those in the Pseudo
 	// section. We will only check one OPT, any others will be left in Extra.
-	for i := 0; i < len(m.Extra); i++ {
-		if opt, ok := m.Extra[i].(*OPT); ok {
+Extra1:
+	for i := len(m.Extra) - 1; i >= 0; i-- {
+		switch opt := m.Extra[i].(type) {
+		case *OPT:
 			m.Security = opt.Security()
 			m.CompactAnswers = opt.CompactAnswers()
 			m.Delegation = opt.Delegation()
@@ -396,49 +426,29 @@ Rest:
 			m.UDPSize = max(opt.UDPSize(), MinMsgSize)
 
 			m.Pseudo = make([]RR, len(opt.Options), len(opt.Options)+1) // +1 for tsig/sig zero, avoid 2x in a append
-			for i := range opt.Options {
-				m.Pseudo[i] = RR(opt.Options[i])
+			for j := range opt.Options {
+				m.Pseudo[j] = RR(opt.Options[j])
 			}
-			m.Extra[i] = m.Extra[len(m.Extra)-1] // opt's place taken with last rr
-			m.Extra = m.Extra[:len(m.Extra)-1]   // remove the OPT RR
-
-			break
+			m.Extra[i] = m.Extra[len(m.Extra)-1] // opt's place switch with last rr
+			m.Extra = m.Extra[:len(m.Extra)-1]   // remove cruft
+			break Extra1
 		}
 	}
-
-	// Check for m.Extra TSIG and SIG(0) and move them to pseudo. This MUST be the the last RR in the extra section.
-	// But as we may have moved things around, we need to iterate over m.Extra again.
-	for i := 0; i < len(m.Extra); i++ {
-		_, ok1 := m.Extra[i].(*TSIG)
-		_, ok2 := m.Extra[i].(*SIG)
-		if ok1 || ok2 {
+Extra2:
+	for i := len(m.Extra) - 1; i >= 0; i-- {
+		switch m.Extra[i].(type) {
+		case *TSIG, *SIG:
 			m.Pseudo = append(m.Pseudo, m.Extra[i])
-			m.Extra[i] = m.Extra[len(m.Extra)-1] // sig/tsig's place taken with last rr
-			m.Extra = m.Extra[:len(m.Extra)-1]   // remove the sig/tsig RR
-
-			break
+			m.Extra[i] = m.Extra[len(m.Extra)-1] // sig/tsig's place switch with last rr
+			m.Extra = m.Extra[:len(m.Extra)-1]   // remove cruft
+			break Extra2
 		}
 	}
 
 	if !s.Empty() {
-		return unpack.Errorf("%d more octets", len(*s))
+		return unpack.Errorf("%d more octets", len(s))
 	}
 	return nil
-}
-
-// Unpack unpacks a binary message that sits in m.Data to a Msg structure.
-func (m *Msg) Unpack() error {
-	s := cryptobyte.String(m.Data)
-	var dh header
-	if !dh.unpack(&s) {
-		return unpack.Errorf("overflow %s", "MsgHeader")
-	}
-	m.setMsgHeader(dh)
-	if m.Options > 0 && m.Options <= MsgOptionUnpackHeader {
-		return nil
-	}
-
-	return m.unpack(dh, &s, m.Data)
 }
 
 // Convert a complete message to a string with dig-like output. String also looks at the [Msg.Options] and
@@ -572,23 +582,27 @@ func (m *Msg) String() string {
 	return s
 }
 
-// isPseudo returns (1) true of we should have a pseudo section in this message, or not (0). It returns an
+// isPseudo returns (1 or 2) if we should have a pseudo section in this message, or not (0). It returns an
 // int becuse we need that number of the Extra section sizing.
-func (m *Msg) isPseudo() uint8 {
-	if lp := len(m.Pseudo); lp > 0 || m.UDPSize > MinMsgSize || m.Security || m.CompactAnswers || m.Delegation || m.Rcode > 0xF {
-		if lp == 0 {
-			return 1 // OPT without options, 1 record
-		}
-		switch m.Pseudo[lp-1].(type) {
-		// OPT + one of these
-		case *TSIG:
-			return 2
-		case *SIG:
-			return 2
-		}
-		return 1 // OPT with options, still 1 record
+func (m *Msg) isPseudo() int {
+	n := 0
+	if m.UDPSize > MinMsgSize || m.Security || m.CompactAnswers || m.Delegation || m.Rcode > 0xF {
+		n = 1
 	}
-	return 0
+	lp := len(m.Pseudo)
+	if lp > 0 {
+		switch m.Pseudo[lp-1].(type) {
+		case *TSIG:
+			n++
+		case *SIG:
+			n++
+		default:
+			if n == 0 { // not any of the message options are set
+				n = 1
+			}
+		}
+	}
+	return n
 }
 
 // Len returns the message length when in uncompressed wire format.
@@ -622,66 +636,12 @@ func (m *Msg) Len() int {
 	// are the extra checks we do here. See [isPseudo] and keep in sync.
 	if len(m.Pseudo) > 0 || m.UDPSize > MinMsgSize || m.Security || m.CompactAnswers || m.Delegation || m.Rcode > 0xF {
 		// If we find things in pseudo we get an OPT RR (fix length) plus the length of the option. OPT is always 11, 10 + "." (root label)
+		// In case of only a TSIG/SIG0 we overestimate, but because of speed we don't want to the full
+		// i.Pseudo check.
 		l += minHeaderSize
 	}
 
-	if l > MaxMsgSize {
-		return MaxMsgSize
-	}
-
-	return l
-}
-
-func (dh *header) pack(msg []byte, off int) (int, error) {
-	off, err := pack.Uint16(dh.ID, msg, off)
-	if err != nil {
-		return off, pack.Errorf(": %s", "header.ID")
-	}
-	off, err = pack.Uint16(dh.Bits, msg, off)
-	if err != nil {
-		return off, pack.Errorf(": %s", "header.Bits")
-	}
-	off, err = pack.Uint16(dh.Qdcount, msg, off)
-	if err != nil {
-		return off, pack.Errorf(": %s", "header.Qdcount")
-	}
-	off, err = pack.Uint16(dh.Ancount, msg, off)
-	if err != nil {
-		return off, pack.Errorf(": %s", "header.Ancount")
-	}
-	off, err = pack.Uint16(dh.Nscount, msg, off)
-	if err != nil {
-		return off, pack.Errorf(": %s", "header.Nscount")
-	}
-	off, err = pack.Uint16(dh.Arcount, msg, off)
-	if err != nil {
-		return off, pack.Errorf(": %s", "header.Arcount")
-	}
-	return off, nil
-}
-
-func (dh *header) unpack(msg *cryptobyte.String) bool {
-	return msg.ReadUint16(&dh.ID) &&
-		msg.ReadUint16(&dh.Bits) &&
-		msg.ReadUint16(&dh.Qdcount) &&
-		msg.ReadUint16(&dh.Ancount) &&
-		msg.ReadUint16(&dh.Nscount) &&
-		msg.ReadUint16(&dh.Arcount)
-}
-
-// setHdr set the header in the dns using the binary data in dh.
-func (m *Msg) setMsgHeader(dh header) {
-	m.ID = dh.ID
-	m.Response = dh.Bits&_QR != 0
-	m.Opcode = uint8(dh.Bits>>11) & 0xF
-	m.Authoritative = dh.Bits&_AA != 0
-	m.Truncated = dh.Bits&_TC != 0
-	m.RecursionDesired = dh.Bits&_RD != 0
-	m.RecursionAvailable = dh.Bits&_RA != 0
-	m.Zero = dh.Bits&_Z != 0 // _Z covers the zero bit, which should be zero; not sure why we set it to the opposite.
-	m.AuthenticatedData = dh.Bits&_AD != 0
-	m.CheckingDisabled = dh.Bits&_CD != 0
-	m.Rcode = dh.Bits & 0xF
+	return min(l, MaxMsgSize)
 }
 
 // Hijack allows user hijacking the allocation in m.Data; this means that when the message is written through
