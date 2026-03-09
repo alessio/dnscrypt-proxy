@@ -9,7 +9,11 @@ import (
 
 func compare(a, b RR) int {
 	switch x := a.(type) {
+	case *TSIG:
+		return x.compare(b)
 	case *DELEG:
+		return x.compare(b)
+	case *OPT:
 		return x.compare(b)
 	case *NSEC3:
 		return x.compare(b)
@@ -161,8 +165,6 @@ func compare(a, b RR) int {
 		return x.compare(b)
 	case *ZONEMD:
 		return x.compare(b)
-	case *OPT:
-		return x.compare(b)
 	case *RESINFO:
 		return x.compare(b)
 	case *SVCB:
@@ -178,8 +180,6 @@ func compare(a, b RR) int {
 	case *AXFR:
 		return x.compare(b)
 	case *IXFR:
-		return x.compare(b)
-	case *TSIG:
 		return x.compare(b)
 	}
 	if x, ok := a.(Comparer); ok {
@@ -1490,13 +1490,6 @@ func (rr *NID) compare(b RR) (x int) {
 		}
 		return 1
 	}
-	x = int(rr.NodeID) - int(b.(*NID).NodeID)
-	if x != 0 {
-		if x < 0 {
-			return -1
-		}
-		return 1
-	}
 	return 0
 }
 
@@ -1520,13 +1513,6 @@ func (rr *L32) compare(b RR) (x int) {
 
 func (rr *L64) compare(b RR) (x int) {
 	x = int(rr.Preference) - int(b.(*L64).Preference)
-	if x != 0 {
-		if x < 0 {
-			return -1
-		}
-		return 1
-	}
-	x = int(rr.Locator64) - int(b.(*L64).Locator64)
 	if x != 0 {
 		if x < 0 {
 			return -1
